@@ -1,0 +1,227 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0f172a">
+<title>Escáner IMEI</title>
+<link rel="manifest" href="manifest.json">
+<link rel="icon" href="icon-192.png">
+<link rel="apple-touch-icon" href="icon-192.png">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<script src="https://unpkg.com/html5-qrcode@2.3.8/html5-qrcode.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+<style>
+  :root{--bg:#0f172a;--card:#1e293b;--line:#334155;--tx:#e2e8f0;--mut:#94a3b8;--ok:#22c55e;--warn:#f59e0b;--err:#ef4444;--acc:#3b82f6}
+  *{box-sizing:border-box}
+  body{margin:0;font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;background:var(--bg);color:var(--tx);padding:12px 12px 90px}
+  h1{font-size:18px;margin:4px 0 10px;display:flex;justify-content:space-between;align-items:center}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:12px;margin-bottom:12px}
+  .row{display:flex;gap:8px;align-items:center}
+  .row>*{flex:1}
+  input{width:100%;padding:12px;border-radius:10px;border:1px solid var(--line);background:#0b1220;color:var(--tx);font-size:16px}
+  button{padding:12px;border:0;border-radius:10px;font-size:15px;font-weight:600;color:#fff;background:var(--acc);cursor:pointer}
+  button.sec{background:#475569}
+  button.ok{background:var(--ok)}
+  button.err{background:var(--err)}
+  button:disabled{opacity:.5}
+  #reader{width:100%;border-radius:10px;overflow:hidden;background:#000;min-height:0}
+  #reader video{border-radius:10px}
+  .big{font-size:34px;font-weight:800}
+  .mut{color:var(--mut);font-size:13px}
+  .bar{height:10px;background:#0b1220;border-radius:6px;overflow:hidden;margin-top:6px}
+  .bar>div{height:100%;background:var(--ok);width:0;transition:width .3s}
+  #flash{position:fixed;left:12px;right:12px;top:12px;padding:14px;border-radius:12px;font-weight:700;text-align:center;display:none;z-index:9;font-size:16px}
+  ul{list-style:none;margin:0;padding:0;max-height:50vh;overflow:auto}
+  li{display:flex;align-items:center;gap:8px;padding:8px 4px;border-bottom:1px solid var(--line);font-family:ui-monospace,monospace;font-size:15px}
+  li .n{color:var(--mut);width:34px;text-align:right}
+  li .c{flex:1;word-break:break-all}
+  li .t{color:var(--mut);font-size:11px}
+  li .x{background:none;color:var(--err);padding:4px 8px;font-size:18px}
+  .tag{font-size:10px;padding:2px 6px;border-radius:6px;background:#334155;color:var(--mut)}
+  .tag.w{background:#78350f;color:#fde68a}
+  .bottom{position:fixed;left:0;right:0;bottom:0;padding:10px 12px calc(10px + env(safe-area-inset-bottom));background:#0b1220;border-top:1px solid var(--line);display:flex;gap:8px}
+  .bottom button{flex:1}
+  label.chk{display:flex;gap:6px;align-items:center;font-size:13px;color:var(--mut)}
+  label.chk input{width:auto}
+</style>
+</head>
+<body>
+<div id="flash"></div>
+<h1>📦 Escáner IMEI <span class="mut" id="lote-lbl"></span></h1>
+
+<div class="card">
+  <div class="row" style="align-items:flex-end">
+    <div><div class="mut">Escaneados</div><div class="big"><span id="cnt">0</span><span class="mut" style="font-size:18px"> / <span id="meta-lbl">150</span></span></div></div>
+    <div style="flex:0 0 110px"><div class="mut">Meta</div><input id="meta" type="number" inputmode="numeric" value="150"></div>
+  </div>
+  <div class="bar"><div id="prog"></div></div>
+  <div style="margin-top:8px"><div class="mut">Lote / referencia (opcional)</div><input id="lote" placeholder="Ej: Pedido cliente X, caja 1"></div>
+</div>
+
+<div class="card">
+  <div id="reader"></div>
+  <div class="row" style="margin-top:8px">
+    <button id="btnCam">📷 Iniciar cámara</button>
+    <button id="btnTorch" class="sec" style="display:none">🔦 Linterna</button>
+  </div>
+  <div class="row" style="margin-top:8px">
+    <label class="chk"><input type="checkbox" id="onlyImei" checked> Extraer solo IMEI (15 dígitos)</label>
+    <label class="chk"><input type="checkbox" id="sound" checked> Sonido</label>
+  </div>
+</div>
+
+<div class="card">
+  <div class="mut" style="margin-bottom:6px">Digitar manualmente (si no lee el código)</div>
+  <form id="fManual" class="row">
+    <input id="manual" inputmode="numeric" autocomplete="off" placeholder="351608307955265">
+    <button type="submit" style="flex:0 0 90px">Agregar</button>
+  </form>
+</div>
+
+<div class="card">
+  <div class="row" style="margin-bottom:8px">
+    <input id="buscar" placeholder="🔍 Buscar en la lista">
+    <button id="btnUndo" class="sec" style="flex:0 0 auto">↩ Deshacer</button>
+  </div>
+  <ul id="lista"></ul>
+  <div class="mut" id="vacio" style="text-align:center;padding:16px">Aún no hay códigos.</div>
+</div>
+
+<div class="card">
+  <div class="row">
+    <button id="btnCsv" class="sec">CSV</button>
+    <button id="btnCopy" class="sec">Copiar lista</button>
+    <button id="btnClear" class="err">Vaciar</button>
+  </div>
+</div>
+
+<div class="bottom">
+  <button id="btnXlsx" class="ok">⬇ Generar Excel</button>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+const KEY = 'escaner-imei-v1';
+let state = { items: [], meta: 150, lote: '' };
+try { const s = JSON.parse(localStorage.getItem(KEY)); if (s && Array.isArray(s.items)) state = Object.assign(state, s); } catch(e){}
+const save = () => { try { localStorage.setItem(KEY, JSON.stringify(state)); } catch(e){} };
+
+$('meta').value = state.meta; $('lote').value = state.lote;
+$('meta').oninput = e => { state.meta = parseInt(e.target.value)||0; save(); render(); };
+$('lote').oninput = e => { state.lote = e.target.value; save(); render(); };
+$('buscar').oninput = render;
+
+// Luhn: valida que el IMEI sea real
+function luhnOk(s){ if(!/^\d{15}$/.test(s)) return false; let sum=0; for(let i=0;i<15;i++){ let d=+s[i]; if(i%2===1){ d*=2; if(d>9) d-=9; } sum+=d; } return sum%10===0; }
+
+function normalize(raw){
+  let t = String(raw).trim();
+  if ($('onlyImei').checked) { const m = t.match(/\d{15}/); if (m) return m[0]; }
+  return t.replace(/\s+/g,'');
+}
+
+let actx;
+function beep(ok=true){
+  if (!$('sound').checked) return;
+  try { actx = actx || new (window.AudioContext||window.webkitAudioContext)();
+    const o=actx.createOscillator(), g=actx.createGain(); o.connect(g); g.connect(actx.destination);
+    o.frequency.value = ok?1200:300; g.gain.value=.15; o.start(); o.stop(actx.currentTime + (ok?.12:.35)); } catch(e){}
+}
+let ft;
+function flash(msg, color){ const f=$('flash'); f.textContent=msg; f.style.background=color; f.style.display='block'; clearTimeout(ft); ft=setTimeout(()=>f.style.display='none',1600); }
+
+function add(raw, metodo){
+  const code = normalize(raw);
+  if (!code) return false;
+  if (state.items.some(i => i.code === code)) {
+    beep(false); navigator.vibrate?.([80,60,80]);
+    flash('⚠ DUPLICADO: ' + code, 'var(--warn)'); return false;
+  }
+  const valido = /^\d{15}$/.test(code) ? luhnOk(code) : null;
+  state.items.push({ code, metodo, fecha: new Date().toISOString(), valido });
+  save(); render(); beep(true); navigator.vibrate?.(60);
+  flash((valido===false?'⚠ Agregado (IMEI no válido): ':'✔ #'+state.items.length+'  ') + code, valido===false?'var(--warn)':'var(--ok)');
+  if (state.meta && state.items.length === state.meta) setTimeout(()=>flash('🎉 Meta alcanzada: '+state.meta, 'var(--acc)'),1700);
+  return true;
+}
+
+const esc = s => String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+
+function render(){
+  const n = state.items.length;
+  $('cnt').textContent = n; $('meta-lbl').textContent = state.meta || '—';
+  $('prog').style.width = state.meta ? Math.min(100, n/state.meta*100)+'%' : '0';
+  $('lote-lbl').textContent = state.lote;
+  const q = $('buscar').value.trim();
+  const ul = $('lista'); ul.innerHTML = '';
+  state.items.map((it,i)=>({it,i})).reverse().filter(({it})=>!q||it.code.includes(q)).forEach(({it,i})=>{
+    const li=document.createElement('li');
+    const hora = new Date(it.fecha).toLocaleTimeString('es-CO',{hour:'2-digit',minute:'2-digit',second:'2-digit'});
+    li.innerHTML = `<span class="n">${i+1}</span><span class="c">${esc(it.code)}<br><span class="t">${hora}</span> <span class="tag">${it.metodo}</span>${it.valido===false?' <span class="tag w">revisar</span>':''}</span><button class="x" title="Eliminar">✕</button>`;
+    li.querySelector('.x').onclick = () => { if(confirm('¿Eliminar '+it.code+'?')){ state.items.splice(i,1); save(); render(); } };
+    ul.appendChild(li);
+  });
+  $('vacio').style.display = n ? 'none' : 'block';
+}
+
+// ---- Cámara ----
+let scanner, running=false, last='', lastT=0, torchOn=false;
+$('btnCam').onclick = async () => {
+  if (running) { await scanner.stop(); running=false; $('btnCam').textContent='📷 Iniciar cámara'; $('btnTorch').style.display='none'; return; }
+  if (!window.isSecureContext) { alert('La cámara requiere HTTPS. Publica la app en un sitio https (Netlify, GitHub Pages).'); return; }
+  if (typeof Html5Qrcode==='undefined') { alert('No cargó la librería del escáner (sin internet la primera vez). Usa ingreso manual.'); return; }
+  // BarcodeDetector nativo de Chrome Android: mucho más rápido para códigos de barras 1D (Code128 de las cajas)
+  scanner = scanner || new Html5Qrcode('reader', { verbose: false, experimentalFeatures: { useBarCodeDetectorIfSupported: true } });
+  try {
+    await scanner.start({ facingMode: 'environment' },
+      // Recuadro ancho: sirve para códigos de barras lineales y también para QR
+      { fps: 12, qrbox: (w,h)=>{ const bw=Math.floor(w*0.9); return {width:bw, height:Math.max(50, Math.floor(Math.min(h*0.6, bw*0.6)))}; } },
+      txt => { const now=Date.now(); if (txt===last && now-lastT<3000) return; last=txt; lastT=now; add(txt,'escáner'); },
+      () => {});
+    running=true; $('btnCam').textContent='⏹ Detener cámara';
+    try { const caps = scanner.getRunningTrackCameraCapabilities(); if (caps.torchFeature().isSupported()) $('btnTorch').style.display='block'; } catch(e){}
+  } catch(e) { alert('No se pudo abrir la cámara: ' + e + '\nRevisa los permisos del navegador.'); }
+};
+$('btnTorch').onclick = async () => {
+  try { torchOn=!torchOn; await scanner.getRunningTrackCameraCapabilities().torchFeature().apply(torchOn); } catch(e){ alert('Linterna no disponible'); }
+};
+
+// ---- Manual ----
+$('fManual').onsubmit = e => {
+  e.preventDefault(); const v=$('manual').value.trim(); if(!v) return;
+  if (/^\d+$/.test(v) && v.length!==15 && !confirm('El código tiene '+v.length+' dígitos (un IMEI tiene 15). ¿Agregar igual?')) return;
+  if (add(v,'manual')) $('manual').value='';
+  $('manual').focus();
+};
+
+$('btnUndo').onclick = () => { if(!state.items.length) return; const it=state.items[state.items.length-1]; if(confirm('¿Quitar el último ('+it.code+')?')){ state.items.pop(); save(); render(); } };
+$('btnClear').onclick = () => { if(state.items.length && confirm('¿Vaciar los '+state.items.length+' códigos? Exporta primero.') && confirm('¿Seguro? No se puede deshacer.')){ state.items=[]; save(); render(); } };
+
+// ---- Exportar ----
+function rows(){ return state.items.map((it,i)=>({ 'No.': i+1, 'IMEI / Código': it.code, 'Fecha': new Date(it.fecha).toLocaleDateString('es-CO'), 'Hora': new Date(it.fecha).toLocaleTimeString('es-CO'), 'Método': it.metodo, 'Validación': it.valido===null?'N/A':(it.valido?'OK':'Revisar'), 'Lote': state.lote })); }
+function fname(ext){ const d=new Date(); const p=n=>String(n).padStart(2,'0'); return `IMEIs_${(state.lote||'lote').replace(/[^\w-]+/g,'_')}_${d.getFullYear()}${p(d.getMonth()+1)}${p(d.getDate())}_${p(d.getHours())}${p(d.getMinutes())}_${state.items.length}u.${ext}`; }
+
+$('btnXlsx').onclick = () => {
+  if (!state.items.length) return alert('No hay códigos.');
+  if (typeof XLSX==='undefined') return alert('No cargó la librería de Excel (sin internet la primera vez). Usa CSV.');
+  const ws = XLSX.utils.json_to_sheet(rows());
+  ws['!cols'] = [{wch:6},{wch:20},{wch:12},{wch:12},{wch:10},{wch:11},{wch:24}];
+  const wb = XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb, ws, 'IMEIs');
+  XLSX.writeFile(wb, fname('xlsx'));
+};
+$('btnCsv').onclick = () => {
+  if (!state.items.length) return alert('No hay códigos.');
+  const r=rows(), h=Object.keys(r[0]);
+  const csv='﻿'+[h.join(';'), ...r.map(o=>h.map(k=>k==='IMEI / Código'?`="${o[k]}"`:`"${String(o[k]).replace(/"/g,'""')}"`).join(';'))].join('\n');
+  const a=document.createElement('a'); a.href=URL.createObjectURL(new Blob([csv],{type:'text/csv'})); a.download=fname('csv'); a.click();
+};
+$('btnCopy').onclick = async () => {
+  try { await navigator.clipboard.writeText(state.items.map(i=>i.code).join('\n')); flash('Lista copiada ('+state.items.length+')','var(--acc)'); } catch(e){ alert('No se pudo copiar'); }
+};
+
+render();
+if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(()=>{});
+</script>
+</body>
+</html>
