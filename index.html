@@ -9,7 +9,6 @@
 <link rel="icon" href="icon-192.png">
 <link rel="apple-touch-icon" href="icon-192.png">
 <meta name="apple-mobile-web-app-capable" content="yes">
-<script src="https://unpkg.com/html5-qrcode@2.3.8/html5-qrcode.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
 <style>
   :root{--bg:#0f172a;--card:#1e293b;--line:#334155;--tx:#e2e8f0;--mut:#94a3b8;--ok:#22c55e;--warn:#f59e0b;--err:#ef4444;--acc:#3b82f6}
@@ -25,8 +24,12 @@
   button.ok{background:var(--ok)}
   button.err{background:var(--err)}
   button:disabled{opacity:.5}
-  #reader{width:100%;border-radius:10px;overflow:hidden;background:#000;min-height:0}
-  #reader video{border-radius:10px}
+  #cam{position:relative;width:100%;aspect-ratio:1;border-radius:10px;overflow:hidden;background:#000;display:none}
+  #cam video{width:100%;height:100%;object-fit:cover;transform-origin:center;display:block}
+  #reticle{position:absolute;inset:14%;border:3px solid rgba(255,255,255,.85);border-radius:14px;box-shadow:0 0 0 999px rgba(0,0,0,.3);pointer-events:none;transition:border-color .15s}
+  #reticle.hit{border-color:var(--ok)}
+  #camHint{position:absolute;left:0;right:0;bottom:6px;text-align:center;font-size:12px;color:#fff;text-shadow:0 1px 3px #000;pointer-events:none}
+  input[type=range]{padding:0;border:0;background:none;accent-color:var(--acc)}
   .big{font-size:34px;font-weight:800}
   .mut{color:var(--mut);font-size:13px}
   .bar{height:10px;background:#0b1220;border-radius:6px;overflow:hidden;margin-top:6px}
@@ -60,11 +63,15 @@
 </div>
 
 <div class="card">
-  <div id="reader"></div>
-  <div class="row" style="margin-top:8px">
-    <button id="btnCam">📷 Iniciar cámara</button>
-    <button id="btnTorch" class="sec" style="display:none">🔦 Linterna</button>
+  <div id="cam"><video id="video" playsinline muted autoplay></video><div id="reticle"></div><div id="camHint">Toca para enfocar · aléjate ~10–15 cm y usa el zoom</div></div>
+  <div id="camCtl" style="display:none;margin-top:8px">
+    <div class="row"><span style="flex:0 0 auto">🔍</span><input type="range" id="zoom" min="1" max="8" step="0.1" value="2.5"><span id="zoomLbl" class="mut" style="flex:0 0 44px;text-align:right">2.5x</span></div>
+    <div class="row" style="margin-top:8px">
+      <button id="btnTorch" class="sec">🔦 Linterna</button>
+      <button id="btnSwitch" class="sec">🔄 Cambiar cámara</button>
+    </div>
   </div>
+  <div class="row" style="margin-top:8px"><button id="btnCam">📷 Iniciar cámara</button></div>
   <div class="row" style="margin-top:8px">
     <label class="chk"><input type="checkbox" id="onlyImei" checked> Extraer solo IMEI (15 dígitos)</label>
     <label class="chk"><input type="checkbox" id="sound" checked> Sonido</label>
@@ -166,26 +173,148 @@ function render(){
 }
 
 // ---- Cámara ----
-let scanner, running=false, last='', lastT=0, torchOn=false;
-$('btnCam').onclick = async () => {
-  if (running) { await scanner.stop(); running=false; $('btnCam').textContent='📷 Iniciar cámara'; $('btnTorch').style.display='none'; return; }
-  if (!window.isSecureContext) { alert('La cámara requiere HTTPS. Publica la app en un sitio https (Netlify, GitHub Pages).'); return; }
-  if (typeof Html5Qrcode==='undefined') { alert('No cargó la librería del escáner (sin internet la primera vez). Usa ingreso manual.'); return; }
-  // BarcodeDetector nativo de Chrome Android: mucho más rápido para códigos de barras 1D (Code128 de las cajas)
-  scanner = scanner || new Html5Qrcode('reader', { verbose: false, experimentalFeatures: { useBarCodeDetectorIfSupported: true } });
+// Lector nativo de Chrome Android (BarcodeDetector) + ZXing WebAssembly como respaldo y segundo intento
+// en códigos de poco contraste (grabados láser gris sobre plástico).
+const ZX_URL = 'https://cdn.jsdelivr.net/npm/barcode-detector@3.2.2/dist/iife/ponyfill.min.js';
+const FORMATS = ['qr_code','data_matrix','code_128','code_39','ean_13','itf'];
+const CAMKEY = 'escaner-imei-cam';
+let cam = { deviceId: null, zoom: 2.5 };
+try { Object.assign(cam, JSON.parse(localStorage.getItem(CAMKEY)) || {}); } catch(e){}
+const saveCam = () => { try { localStorage.setItem(CAMKEY, JSON.stringify(cam)); } catch(e){} };
+
+const video = $('video'), cv = document.createElement('canvas'), cx = cv.getContext('2d', { willReadFrequently: true });
+let stream, track, caps = {}, running = false, torchOn = false, backCams = [], dz = 1, frame = 0, last = '', lastT = 0;
+let nativeDet = null, zxDet = null, zxLoading = null;
+
+async function initDetectors(){
+  if (!nativeDet && 'BarcodeDetector' in window) {
+    try { const sup = await BarcodeDetector.getSupportedFormats(); const f = FORMATS.filter(x => sup.includes(x)); if (f.includes('qr_code')) nativeDet = new BarcodeDetector({ formats: f }); } catch(e){}
+  }
+  if (!zxLoading) zxLoading = new Promise(res => {
+    const s = document.createElement('script'); s.src = ZX_URL;
+    s.onload = () => { try { zxDet = new BarcodeDetectionAPI.BarcodeDetector({ formats: FORMATS }); } catch(e){} res(); };
+    s.onerror = () => res(); document.head.appendChild(s);
+  });
+  if (!nativeDet) await zxLoading;
+}
+
+function stopStream(){ if (stream) stream.getTracks().forEach(t => t.stop()); stream = null; track = null; }
+
+async function openCamera(deviceId){
+  stopStream();
+  const v = { width: { ideal: 1920 }, height: { ideal: 1080 }, frameRate: { ideal: 30 } };
+  if (deviceId) v.deviceId = { exact: deviceId }; else v.facingMode = { ideal: 'environment' };
+  stream = await navigator.mediaDevices.getUserMedia({ video: v, audio: false });
+  track = stream.getVideoTracks()[0];
+  video.srcObject = stream; await video.play();
+  caps = track.getCapabilities?.() || {};
+  // Algunos Samsung reportan linterna/zoom un momento después de abrir la cámara
+  if (!caps.torch && !caps.zoom) { await new Promise(r => setTimeout(r, 600)); caps = track?.getCapabilities?.() || {}; }
+  if (caps.focusMode?.includes('continuous')) try { await track.applyConstraints({ advanced: [{ focusMode: 'continuous' }] }); } catch(e){}
+  torchOn = false; updateTorchBtn(); applyZoom(cam.zoom);
+  return track.getSettings().deviceId;
+}
+
+async function listBackCams(){
+  const ds = (await navigator.mediaDevices.enumerateDevices()).filter(d => d.kind === 'videoinput');
+  const b = ds.filter(d => /back|rear|trasera|environment/i.test(d.label));
+  // Samsung: "camera2 0, facing back" es la cámara principal (la que tiene flash)
+  const main = d => /\bcamera2? 0\b/i.test(d.label) ? 1 : 0;
+  return (b.length ? b : ds).sort((a, z) => main(z) - main(a));
+}
+
+async function startCam(){
+  if (!window.isSecureContext) return alert('La cámara requiere HTTPS. Publica la app en un sitio https (Netlify, GitHub Pages).');
+  if (!navigator.mediaDevices?.getUserMedia) return alert('Este navegador no permite usar la cámara. Usa Chrome.');
+  $('btnCam').disabled = true; $('btnCam').textContent = 'Abriendo cámara…';
   try {
-    await scanner.start({ facingMode: 'environment' },
-      // Recuadro ancho: sirve para códigos de barras lineales y también para QR
-      { fps: 12, qrbox: (w,h)=>{ const bw=Math.floor(w*0.9); return {width:bw, height:Math.max(50, Math.floor(Math.min(h*0.6, bw*0.6)))}; } },
-      txt => { const now=Date.now(); if (txt===last && now-lastT<3000) return; last=txt; lastT=now; add(txt,'escáner'); },
-      () => {});
-    running=true; $('btnCam').textContent='⏹ Detener cámara';
-    try { const caps = scanner.getRunningTrackCameraCapabilities(); if (caps.torchFeature().isSupported()) $('btnTorch').style.display='block'; } catch(e){}
-  } catch(e) { alert('No se pudo abrir la cámara: ' + e + '\nRevisa los permisos del navegador.'); }
-};
+    await initDetectors();
+    if (!nativeDet && !zxDet) throw 'No se pudo cargar el lector de códigos (se necesita internet la primera vez).';
+    $('cam').style.display = 'block';
+    let id;
+    try { id = await openCamera(cam.deviceId); } catch(e) { if (!cam.deviceId) throw e; cam.deviceId = null; id = await openCamera(null); }
+    backCams = await listBackCams();
+    // Primera vez: si la cámara que abrió Chrome no tiene linterna, buscar la trasera que sí (la principal)
+    if (!cam.deviceId && !caps.torch) {
+      let found = false;
+      for (const d of backCams.filter(d => d.deviceId !== id)) {
+        try { const nid = await openCamera(d.deviceId); if (caps.torch) { id = nid; found = true; break; } } catch(e){}
+      }
+      if (!found) id = await openCamera(id);
+    }
+    cam.deviceId = id; saveCam();
+    running = true; $('camCtl').style.display = 'block';
+    loop();
+  } catch(e) { stopCam(); alert('No se pudo abrir la cámara: ' + (e.message || e) + '\nRevisa los permisos del navegador.'); }
+  finally { $('btnCam').disabled = false; $('btnCam').textContent = running ? '⏹ Detener cámara' : '📷 Iniciar cámara'; }
+}
+
+function stopCam(){
+  running = false;
+  if (track && torchOn) track.applyConstraints({ advanced: [{ torch: false }] }).catch(()=>{});
+  stopStream(); video.srcObject = null; torchOn = false;
+  $('cam').style.display = 'none'; $('camCtl').style.display = 'none'; $('btnCam').textContent = '📷 Iniciar cámara';
+}
+
+// Zoom combinado: primero el zoom de la cámara (si el equipo lo expone), el resto digital (recorte)
+let zoomBusy = false;
+function applyZoom(val){
+  val = Math.max(1, +val || 1); cam.zoom = val; $('zoom').value = val; $('zoomLbl').textContent = val.toFixed(1) + 'x';
+  const z = caps.zoom; let hw = 1;
+  if (z && z.max > z.min) { hw = Math.min(Math.max(val, z.min), z.max);
+    if (track && !zoomBusy) { zoomBusy = true; track.applyConstraints({ advanced: [{ zoom: hw }] }).catch(()=>{}).finally(() => { zoomBusy = false; }); } }
+  dz = val / hw; video.style.transform = `scale(${dz})`;
+}
+$('zoom').oninput = e => applyZoom(e.target.value);
+$('zoom').onchange = e => { applyZoom(e.target.value); saveCam(); };
+
+function updateTorchBtn(){ const b = $('btnTorch'); b.textContent = torchOn ? '🔦 Apagar' : '🔦 Linterna'; b.className = torchOn ? 'ok' : 'sec'; b.style.opacity = caps.torch ? 1 : .5; }
 $('btnTorch').onclick = async () => {
-  try { torchOn=!torchOn; await scanner.getRunningTrackCameraCapabilities().torchFeature().apply(torchOn); } catch(e){ alert('Linterna no disponible'); }
+  if (!track) return;
+  try { await track.applyConstraints({ advanced: [{ torch: !torchOn }] }); } catch(e){}
+  const on = track.getSettings().torch;
+  if (on === undefined && !caps.torch) return flash('Esta cámara no tiene linterna. Prueba 🔄 Cambiar cámara', 'var(--warn)');
+  torchOn = on ?? !torchOn; updateTorchBtn();
 };
+
+$('btnSwitch').onclick = async () => {
+  if (backCams.length < 2) return flash('Solo hay una cámara trasera disponible', 'var(--warn)');
+  const i = (backCams.findIndex(d => d.deviceId === cam.deviceId) + 1) % backCams.length;
+  try { cam.deviceId = await openCamera(backCams[i].deviceId); saveCam(); flash(`Cámara ${i+1}/${backCams.length}` + (caps.torch ? ' · con linterna' : ''), 'var(--acc)'); }
+  catch(e) { flash('No se pudo abrir esa cámara', 'var(--err)'); try { await openCamera(null); } catch(e){} }
+};
+
+// Tocar la imagen: enfocar de nuevo
+$('cam').onclick = async () => {
+  if (!track || !caps.focusMode?.includes('single-shot')) return;
+  try { await track.applyConstraints({ advanced: [{ focusMode: 'single-shot' }] }); } catch(e){}
+  setTimeout(() => track?.applyConstraints({ advanced: [{ focusMode: 'continuous' }] }).catch(()=>{}), 1500);
+};
+
+function onCode(txt){
+  const now = Date.now();
+  if (txt === last && now - lastT < 3000) { lastT = now; return false; } // mismo código aún frente a la cámara
+  last = txt; lastT = now;
+  $('reticle').classList.add('hit'); setTimeout(() => $('reticle').classList.remove('hit'), 400);
+  add(txt, 'escáner'); return true;
+}
+
+async function loop(){
+  while (running) {
+    if (track && video.readyState >= 2 && video.videoWidth) {
+      // Solo se decodifica el cuadro visible (ya recortado por el zoom digital): menos píxeles, más rápido
+      const vw = video.videoWidth, vh = video.videoHeight, side = Math.min(vw, vh) / dz, out = Math.round(Math.min(side, 1000));
+      if (cv.width !== out) cv.width = cv.height = out;
+      cx.drawImage(video, (vw - side) / 2, (vh - side) / 2, side, side, 0, 0, out, out);
+      const det = zxDet && (!nativeDet || frame % 3 === 2) ? zxDet : nativeDet; frame++;
+      try { for (const r of await det.detect(cv)) if (r.rawValue && onCode(r.rawValue)) break; } catch(e){}
+    }
+    await new Promise(r => requestAnimationFrame(r));
+  }
+}
+
+$('btnCam').onclick = () => running ? stopCam() : startCam();
+document.addEventListener('visibilitychange', () => { if (document.hidden && running) stopCam(); });
 
 // ---- Manual ----
 $('fManual').onsubmit = e => {

@@ -1,6 +1,6 @@
-const C = 'escaner-imei-v2';
+const C = 'escaner-imei-v3';
 const ASSETS = ['./', 'index.html', 'manifest.json', 'icon-192.png', 'icon-512.png',
-  'https://unpkg.com/html5-qrcode@2.3.8/html5-qrcode.min.js',
+  'https://cdn.jsdelivr.net/npm/barcode-detector@3.2.2/dist/iife/ponyfill.min.js',
   'https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js'];
 const put = (req, res) => { if (res && (res.ok || res.type === 'opaque')) { const cp = res.clone(); caches.open(C).then(c => c.put(req, cp)).catch(()=>{}); } return res; };
 self.addEventListener('install', e => { e.waitUntil(caches.open(C).then(c => Promise.all(ASSETS.map(a => c.add(a).catch(()=>{}))))); self.skipWaiting(); });
